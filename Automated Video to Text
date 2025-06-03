@@ -1,0 +1,114 @@
+import streamlit as st
+from pytubefix import YouTube
+import pandas as pd
+import tempfile
+import os
+from faster_whisper import WhisperModel
+import ffmpeg
+
+# Set Streamlit page configuration
+st.set_page_config(page_title="🎓 Automated Video-to-Text Lecture Notes", layout="wide")
+
+class VideoTranscriberApp:
+    def __init__(self):
+        self.model = self.load_model()
+        self.file_path = None
+
+    @st.cache_resource
+    def load_model(self):
+        return WhisperModel("base", compute_type="int8")  # Choose from tiny/base/small
+
+    def download_youtube_audio(self, url):
+        yt = YouTube(url)
+        stream = yt.streams.filter(only_audio=True).first()
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        outfile = stream.download(filename=temp_file.name)
+        base, ext = os.path.splitext(outfile)
+        newfile = base + ".mp3"
+        os.rename(outfile, newfile)
+        return newfile
+
+    def transcribe_audio(self, file_path):
+        segments, _ = self.model.transcribe(file_path, beam_size=5)
+        transcript = ""
+        segment_list = []
+        for seg in segments:
+            text = seg.text.strip()
+            transcript += f"{text} "
+            segment_list.append({
+                "Start": round(seg.start, 2),
+                "End": round(seg.end, 2),
+                "Text": text
+            })
+        return transcript, segment_list
+
+    def extract_key_points(self, segments, interval=30):
+        key_points = []
+        last_time = 0
+        for seg in segments:
+            if seg["Start"] >= last_time:
+                key_points.append(f"[{int(seg['Start'])}s] {seg['Text']}")
+                last_time += interval
+        return key_points
+
+    def run(self):
+        st.title("🎓 Automated Video-to-Text Lecture Notes")
+        st.markdown("""
+        *What It Does:*  
+        Takes recorded Zoom or YouTube videos and generates:
+        - Lecture transcripts  
+        - Timestamps  
+        - Key point summaries
+
+        *Why It Helps You:*  
+        ✅ Convert your past classes into e-learning content or blog posts automatically
+        """)
+
+        input_method = st.radio("Choose input method:", ["Upload Video/Audio", "YouTube Link"])
+
+        if input_method == "Upload Video/Audio":
+            uploaded_file = st.file_uploader("Upload MP4 or MP3", type=["mp4", "mp3"])
+            if uploaded_file:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_file.name) as temp_file:
+                    temp_file.write(uploaded_file.read())
+                    self.file_path = temp_file.name
+
+        elif input_method == "YouTube Link":
+            yt_url = st.text_input("Paste YouTube URL:")
+            if yt_url:
+                with st.spinner("Downloading audio from YouTube..."):
+                    try:
+                        self.file_path = self.download_youtube_audio(yt_url)
+                        st.success("Download complete!")
+                    except Exception as e:
+                        st.error(f"Failed to download video: {e}")
+
+        if self.file_path and st.button("Transcribe"):
+            with st.spinner("Transcribing audio... please wait."):
+                transcript, segments = self.transcribe_audio(self.file_path)
+                st.success("Transcription Complete!")
+
+                # Display transcript
+                st.subheader("📜 Full Transcript")
+                st.text_area("Transcript", transcript, height=300)
+
+                # Show timestamped segments
+                st.subheader("🕒 Timestamped Segments")
+                df_segments = pd.DataFrame(segments)
+                st.dataframe(df_segments)
+
+                # Key points summary
+                st.subheader("🧠 Key Point Summary (Every 30s)")
+                for point in self.extract_key_points(segments):
+                    st.markdown(f"- {point}")
+
+                # Optional downloads
+                st.download_button("⬇ Download Transcript", transcript, file_name="transcript.txt")
+                st.download_button("⬇ Download Segments as CSV", df_segments.to_csv(index=False), file_name="segments.csv")
+
+                os.remove(self.file_path)
+
+# Instantiate and run the app
+if __name__ == "__main__":
+    app = VideoTranscriberApp()
+    app.run()
